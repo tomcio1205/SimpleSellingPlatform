@@ -22,6 +22,7 @@ CREATE TABLE public.users
   phone_number integer,
   password character varying,
   user_type_id integer,
+  stripe_id character varying,
   CONSTRAINT users_pkey PRIMARY KEY (id),
   CONSTRAINT users_user_type_id_fkey FOREIGN KEY (user_type_id)
       REFERENCES public.users_type (id) MATCH SIMPLE
@@ -115,6 +116,7 @@ CREATE TABLE public.orders
   staff_id integer,
   shop_id integer,
   create_time timestamp without time zone DEFAULT now(),
+  stripe_id character varying,
   CONSTRAINT orders_pkey PRIMARY KEY (id),
   CONSTRAINT orders_delivery_type_id_fkey FOREIGN KEY (delivery_type_id)
       REFERENCES public.deliveries_type (id) MATCH SIMPLE

@@ -41,7 +41,6 @@ class PostgresConnection:
 		except psycopg2.ProgrammingError as e:
 			return e
 
-
 	def __repr__(self):
 		return "Class Name: {self.__class__.__name__}".format(self=self)
 

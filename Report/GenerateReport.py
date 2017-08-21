@@ -15,6 +15,9 @@ class GeneratePDFReport:
 		self.product_quant = product['quantity']
 		self.report_name = report_name
 
+	def __repr__(self):
+		return "Class name {}".format(self.__class__.__name__)
+
 	def create_report(self):
 		report_name = "{}/temp/{}.pdf".format(os.getcwd(), self.report_name)
 		c = canvas.Canvas(report_name, pagesize=A4)

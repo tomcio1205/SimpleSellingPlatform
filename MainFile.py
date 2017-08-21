@@ -1,11 +1,80 @@
 # -*- coding: utf-8 -*-
 import json
 from DBConnection.DatabaseConnection import PostgresConnection
-from flask import Flask, request
+from flask import Flask, request, Response
 from Config.DBConfig import database_parameters
+from functools import wraps
+import hashlib
+import stripe
+
+stripe.api_key = "sk_test_BQokikJOvBiI2HlWgH4olfQ2"
+
 app = Flask(__name__)
 PER_PAGE = 5
 
+
+def encode_pswd(password):
+	salt = "md5".encode('utf-8')
+	m = hashlib.md5()
+	m.update(salt + password.encode('utf-8'))
+	pswd = m.hexdigest()
+	return pswd
+
+
+def check_auth(username, password):
+	"""This function is called to check if a username /
+    password combination is valid.
+    """
+	pswd = encode_pswd(password)
+	query = "Select email, password from users where email = '{}'".format(username)
+	ret = execute_query(query)
+	try:
+		user_param = json.loads(ret)[0]
+	except json.decoder.JSONDecodeError:
+		return False
+
+	return username == user_param['email'] and pswd == user_param['password']
+
+
+def authenticate():
+	"""Sends a 401 response that enables basic auth"""
+	return Response(
+		'Could not verify your access level for that URL.\n'
+		'You have to login with proper credentials', 401,
+		{'WWW-Authenticate': 'Basic realm="Login Required"'})
+
+
+def requires_auth(f):
+	@wraps(f)
+	def decorated(*args, **kwargs):
+		auth = request.authorization
+		if not auth or not check_auth(auth.username, auth.password):
+			return authenticate()
+		return f(*args, **kwargs)
+
+	return decorated
+
+
+@app.route('/createuser', methods=['POST'])
+def create_user():
+	received_data = json.loads(request.data)
+	description = "Customer for {email}".format(email=received_data['email'])
+	x_strp = stripe.Customer.create(
+	  description=description,
+	  source="tok_amex" # obtained with Stripe.js
+	)
+	pswd = encode_pswd(received_data['password'])
+	received_data['password'] = pswd
+	received_data['stripe_id'] = x_strp['id']
+	query = "insert into users (first_name, last_name, email, phone_number, password, user_type_id, stripe_id)" \
+	        " values (%(first_name)s, %(last_name)s, %(email)s, %(phone_number)s, %(password)s," \
+	        " %(user_type_id)s, %(stripe_id)s) RETURNING id"
+	ret = execute_query(query, received_data)
+	try:
+		json.loads(ret)[0]['id']
+	except json.decoder.JSONDecodeError:
+		return "Insert into order_details failed"
+	return "Success"
 
 
 @app.route('/getallproducts/', defaults={'page': 1, 'catchall': ''})
@@ -13,6 +82,16 @@ PER_PAGE = 5
 @app.route('/getallproducts/page/<int:page>/<path:catchall>')
 @app.route('/getallproducts/<path:catchall>', defaults={'page': 1})
 def get__all_products(page, catchall):
+	"""
+	Get all products (with pagination). Example call:
+	/getallproducts/ : no filter and title - return all products
+	/getallproducts/page/2: next page of products
+	/getallproducts/filterby=Food: get all products of food category
+	/getallproducts/filterby=Food%title=Milk: get all products of food category with milk in title
+	:param page:
+	:param catchall:
+	:return:
+	"""
 	product_option = {}
 
 	for el in catchall.split('%'):
@@ -43,20 +122,13 @@ def get__all_products(page, catchall):
 	return ret
 
 
-# @app.route('/getproducts/', defaults={'page': 1})
-# @app.route('/getproducts/page/<int:page>')
-# def get__all_products(page):
-# 	query = "select image, title, description,product_value,curency_unit,comments,likes," \
-# 	        " category_id from products order by category_id"
-#
-# 	result = execute_query(query)
-# 	ret = Pagination(page, 1, result).iter_pages()
-#
-# 	return ret
-
-
 @app.route('/productdetails/<string:product_id>')
 def get_product(product_id):
+	"""
+	Function that return details of product
+	:param product_id: eg. 2
+	:return: json in str type
+	"""
 	query = 'select title, image, description, product_value, curency_unit, comments, likes from products' \
 	        ' where id = {id}'.format(id=product_id)
 
@@ -66,33 +138,42 @@ def get_product(product_id):
 
 
 @app.route('/createorder', methods=['POST'])
+@requires_auth
 def create_order():
 	"""
-	Receive simple json:
-	{
-	"user": 3,
-	"total_price": 1234,
-	"delivery_type": 1,
-	"description": "send as soon as possible",
-	"prduct_counts": 4,
-	"data": [
-		{
-			"product_id": 2,
-			"product_count": 2
-		},
-		{
-			"product_id": 3,
-			"product_count": 2
-		}
+    Example received json:
+    {
+    "user": 3,
+    "total_price": 1234,
+    "delivery_type": 1,
+    "description": "send as soon as possible",
+    "prduct_counts": 4,
+    "data": [
+        {
+            "product_id": 2,
+            "product_count": 2
+        },
+        {
+            "product_id": 3,
+            "product_count": 2
+        }
 
-		]
-	}
-	:return:
-	"""
+        ]
+    }
+    :return:
+    """
 
 	received_data = json.loads(request.data)
-	query = "insert into orders (user_id, delivery_type_id, description, total_price, product_counts_sum)" \
-	        " values (%(user)s, %(delivery_type)s, %(description)s, %(total_price)s, %(prduct_counts)s) RETURNING id"
+	x_strp = stripe.Charge.create(
+		amount=int(received_data['total_price'])*118, #integer only? #TODO 50 cents minimum
+		currency="eur", #TODO
+		description="Charge for user_id = {}".format(received_data['user']), #TODO get user mail?
+		source="tok_visa", # obtained with Stripe.js
+		idempotency_key='3ylzJDWar4cpm3F2' #TODO generating key
+	)
+	received_data['stripe_id'] = x_strp['id']
+	query = "insert into orders (user_id, delivery_type_id, description, total_price, product_counts_sum, stripe_id)" \
+	        " values (%(user)s, %(delivery_type)s, %(description)s, %(total_price)s, %(prduct_counts)s, %(stripe_id)s) RETURNING id"
 	ret = execute_query(query, received_data)
 	try:
 		json.loads(ret)[0]['id']
@@ -112,24 +193,37 @@ def create_order():
 
 @app.route('/userwishlist', methods=['POST'])
 def user_wishlist(request):
-	# I assume that user wish list will by sent as json type
-	data = json.loads(request.content.read())
-
-
-########AUTH########
+	"""
+	USER WISH LIST ???
+	:param request:
+	:return:
+	"""
+	pass
 
 
 def execute_query(query, args=()):
+	"""
+	Call query on database
+	:param query: "Select * from users where id = %(id)s"
+	:param args: {id: 1}
+	:return: json in str type
+	"""
 	db_param = database_parameters()
 	with PostgresConnection(db_param, query, args) as ps:
 		return ps
 
 
 class Pagination(object):
+	"""
+	Simple class tha paginate received records
+	"""
 	def __init__(self, page, per_page, result):
 		self.page = page
 		self.per_page = per_page
 		self.result = result
+
+	def __repr__(self):
+		return "Class name {}".format(self.__class__.__name__)
 
 	def iter_pages(self):
 		try:
@@ -143,7 +237,6 @@ class Pagination(object):
 				break
 			page_list.append(list_pag[iter])
 		return json.dumps(page_list, default=PostgresConnection.decimal_default)
-		# return list_pag
 
 
 if __name__ == '__main__':
